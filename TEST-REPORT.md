@@ -2,6 +2,16 @@
 
 Checked 08 November 2026, 19:19 Europe/Lisbon. Nothing published.
 
+## Spelling tolerance (08 November 2026)
+
+Open short and fill-in answers still match exact text, synonyms, UK/US spellings, formulas and number words first. A second pass accepts a small typo in ordinary words and shows `Correct! Watch the spelling:` plus the right spelling, with full credit. Round history is unchanged (`date`, `label`, `score`, `total`, `topics`). Progress stays in `melchior-science-lab-v2`. The service worker cache id is `a91c4e7b2d05`, so an installed iPad app can pick up the new page and keep local progress.
+
+`node test/spelling.test.mjs` passed: 121 open questions, 203 exact aliases, 35,979 cross-checks against every other question answer, and 133/133 adjacent letter-swaps on words of 5+ letters.
+
+Accepted typos (representative): `elemnt` → element; `magnezium oxide`, `magnseium oxide`, `magnesiumoxide` → magnesium oxide; `iron sulfde` → iron sulfide; `copper sulfae` → copper sulfate; `carbon dioxde`, `carbondioxide`, `carbon dioxyde` → carbon dioxide; `exotermic` → exothermic; `reactnts` → reactants; `produts` → products; `incomplet combustion` → incomplete combustion; `climat change` → climate change; `thermal decompositon` → thermal decomposition; `withot water` → without water; `soild` → solid; `pnik` → pink; `bleu` → blue; `watr vapour` → water vapour; `metane` → methane.
+
+Still incorrect (representative): magnesium dioxide / monoxide / dioxde; iron sulfate / sulphite; copper sulfide; sodium nitrite; zinc chlorate; carbon monoxide / carbon oxide / CO3; endothermic / endothermc; products on a reactants question and the reverse; ethane / propane / methene for methane; O3, N2, or the bare symbol `o` for oxygen; `iron`, `F`, or `fee` for Fe; 4, threee, or tree for 3; 81 or eightty for 80; melting for freezing; oil for boiling; vapour, steam, ice, or h20 for water; not / isn't / no oxygen; complete combustion for incomplete combustion; conversation of mass; empty, `???`, `xxxxxx`, `qwerty`. Ambiguous slips that are as close to a different idea as to the answer are rejected too (`methne`, `copper sulfete`, `calcium carbonte`). Multiple-choice and true/false choices stay exact.
+
 | Topic | Total | MCQ | True/false | Short answer | Fill-in |
 |---|---:|---:|---:|---:|---:|
 | Substances & formulas | 60 | 17 | 1 | 41 | 1 |
