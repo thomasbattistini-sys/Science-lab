@@ -22,7 +22,307 @@ function normalise(value){
  const parsed=numberPhrase(numeric);if(parsed!==null)return String(parsed);
  return v.replace(/[^a-z0-9-]+/g,' ').replace(/-/g,' ').trim().replace(/\s+/g,' ');
 }
-function checkAnswer(q,value){const n=normalise(value);return !!n&&q.aliases.some(a=>normalise(a)===n);}
+/* Open answers: exact and listed synonyms first. Then a length-aware typo
+   check (missing, extra, replaced or swapped letters), including multi-word
+   names. Numbers, formulas and symbols stay exact. Nearby but different
+   science words are not spelling variants. */
+const SYMBOLS=new Set(['h','c','n','o','k','s','i','li','na','mg','al','si','cl','ar','ca','fe','co','ni','cu','zn','br','ag','sn','pb','mn','cr','ti']);
+const CHEM_SUFFIXES=['ite','ate','ide','ane','ene','yne','ine'];
+const CHEM_STEMS=new Set(['meth','eth','prop','but','pent','hex','hept','oct']);
+const CHEM_PREFIXES=['tetra','mono','hydro','endo','exo','thio','tri','non','per','di','de'];
+const HARD_NEG=/^(not|no|never|none|nothing|neither|nobody|nowhere|non|isn|isnt|dont|doesn|doesnt|didn|didnt|cannot|cant|wont|aint|don|did)$/;
+const JUNK=new Set(['idk','dunno','nope','pass','skip','unknown','blank','na','asdf','asdfg','asdfgh','asdfghjkl','qwerty','qwertyuiop','test','hello','hi','yes','no','ok','okay','lol','abc','xyz','blah','whatever','stuff','thing','things','idc','hmm','uh','um','err','xxx','xxxx','zzzz','foo','bar','baz','n','a','nil','null','undefined','dontknow','iduno']);
+const FAMILIES=[
+ ['oxide','oxides'],['dioxide','dioxides'],['monoxide','monoxides'],['peroxide','peroxides'],['trioxide'],
+ ['sulfide','sulfides'],['sulfate','sulfates'],['sulfite','sulfites'],['disulfide'],
+ ['nitrate','nitrates'],['nitrite','nitrites'],['nitride','nitrides'],
+ ['carbonate','carbonates'],['carbide','carbides'],
+ ['chloride','chlorides'],['chlorate','chlorates'],['chlorite','chlorites'],['chlorine'],
+ ['bromide','bromides'],['bromine'],['iodide','iodides'],['iodine'],['fluoride'],['fluorine'],
+ ['exothermic'],['endothermic'],
+ ['reactant','reactants'],['product','products'],
+ ['solid','solids'],['liquid','liquids'],['gas','gases'],
+ ['melting','melt','melts'],
+ ['freezing','freeze','freezes','solidifying','solidification','solidifies'],
+ ['boiling','boil','boils'],
+ ['evaporation','evaporate','evaporating','evaporates'],
+ ['condensation','condense','condensing','condenses'],
+ ['sublimation','sublimate'],
+ ['methane'],['ethane'],['propane'],['butane'],['pentane'],['hexane'],['methene'],['ethene'],
+ ['oxygen'],['hydrogen'],['nitrogen'],['helium'],['carbon'],
+ ['iron'],['copper'],['zinc'],['sodium'],['magnesium'],['aluminium'],['calcium'],['lithium'],['potassium'],['sulfur'],['phosphorus'],['manganese'],
+ ['ion','ions'],
+ ['pink'],['blue'],['black'],['yellow'],['green'],['red'],['white'],['orange'],['grey','gray'],['brown'],['purple'],
+ ['cloudy'],['milky'],['clear'],
+ ['oxidation'],['reduction'],['combustion'],['decomposition'],
+ ['acid','acids'],['alkali','alkalis'],['base','bases'],
+ ['complete'],['incomplete'],
+ ['water'],['vapour'],['steam'],['ice'],
+ ['oil'],['fuel','fuels'],['soot'],['heat'],['light'],['ash'],['smoke'],
+ ['element','elements'],['compound','compounds'],['atom','atoms'],['molecule','molecules'],['mixture','mixtures'],
+ ['hydrocarbon','hydrocarbons']
+];
+const EXTRA_PHRASES=['endothermic','monoxide','carbon monoxide','dioxide','nitrite','nitride','chlorate','chlorite','ethane','propane','butane','pentane','hexane','reduction','disulfide','sulfite','manganese','carbon oxide','sodium nitrite','sodium sulfide','iron sulfate','calcium dioxide','magnesium dioxide','magnesium monoxide','aluminium dioxide','zinc sulfate','copper sulfite','iron sulfite','complete combustion','hydrogen sulfide','sulfur trioxide','nitrogen dioxide','methene','ethene','peroxide','zinc chlorate','sodium chlorate','manganese oxide','ion','ions','steam','ice','carbonite','chlorine gas','sulfate','nitrite ion'];
+let FAMILY=new Map(),PROTECTED=new Set(),WORD_BUCKETS=new Map(),PHRASE_SET=new Set(),PHRASE_BUCKETS=new Map();
+function singularise(w){
+ if(w.length>4&&w.endsWith('ses'))return w.slice(0,-2);
+ if(w.length>4&&/(ch|sh|x|z)es$/.test(w))return w.slice(0,-2);
+ if(w.length>3&&w.endsWith('s')&&!w.endsWith('ss'))return w.slice(0,-1);
+ return w;
+}
+function isQuantityToken(t){return /^\d+(?:\.\d+)?$/.test(t);}
+function isFormulaToken(t){
+ if(!t)return false;
+ if(isQuantityToken(t))return true;
+ if(t.length<=2&&SYMBOLS.has(t))return true;
+ return /[a-z]/.test(t)&&/\d/.test(t);
+}
+function isNumericNorm(s){return /^-?\d+(?:\.\d+)?$/.test(s);}
+function isFormulaNorm(s){const parts=s.split(' ').filter(Boolean);return parts.length>0&&parts.every(isFormulaToken);}
+function addWord(w){
+ if(!w||w.length<3||isQuantityToken(w)||isFormulaToken(w))return;
+ if(PROTECTED.has(w))return;
+ PROTECTED.add(w);
+ const list=WORD_BUCKETS.get(w.length);
+ if(list)list.push(w);else WORD_BUCKETS.set(w.length,[w]);
+}
+function addPhrase(p){
+ const n=normalise(p);
+ if(!n)return;
+ PHRASE_SET.add(n);
+ const stripped=n.replace(/ /g,'');
+ if(!stripped)return;
+ const list=PHRASE_BUCKETS.get(stripped.length);
+ if(list){if(!list.includes(stripped))list.push(stripped);}else PHRASE_BUCKETS.set(stripped.length,[stripped]);
+ for(const t of n.split(' '))addWord(t);
+}
+function buildLexicon(data){
+ FAMILY=new Map();PROTECTED=new Set();WORD_BUCKETS=new Map();PHRASE_SET=new Set();PHRASE_BUCKETS=new Map();
+ FAMILIES.forEach((words,i)=>{for(const w of words){FAMILY.set(w,i);addWord(w);}});
+ for(const phrase of EXTRA_PHRASES)addPhrase(phrase);
+ const questions=data&&Array.isArray(data.questions)?data.questions:[];
+ for(const q of questions){
+  const aliases=Array.isArray(q.aliases)?q.aliases.slice():[];
+  if(q.answer)aliases.push(q.answer);
+  for(const alias of aliases)addPhrase(alias);
+ }
+}
+function familyOf(word){
+ if(!word)return null;
+ if(FAMILY.has(word))return FAMILY.get(word);
+ const s=singularise(word);
+ return FAMILY.has(s)?FAMILY.get(s):null;
+}
+function splitSuffix(w){
+ for(const suf of CHEM_SUFFIXES){
+  if(w.length>=suf.length+4&&w.endsWith(suf))return {stem:w.slice(0,-suf.length),suf};
+ }
+ return null;
+}
+function suffixChange(a,b){
+ const sa=splitSuffix(a),sb=splitSuffix(b);
+ if(!sa||!sb)return false;
+ if(sa.suf!==sb.suf)return true;
+ return CHEM_STEMS.has(sa.stem)&&CHEM_STEMS.has(sb.stem)&&sa.stem!==sb.stem;
+}
+function affixChange(a,b){
+ if(!a||!b||a===b)return false;
+ for(const p of CHEM_PREFIXES){
+  const minRest=p==='de'?6:4;
+  if((a===p+b&&b.length>=minRest)||(b===p+a&&a.length>=minRest))return true;
+ }
+ for(const p of CHEM_PREFIXES){
+  if(!a.startsWith(p))continue;
+  const rest=a.slice(p.length);
+  if(rest.length<4)continue;
+  for(const q of CHEM_PREFIXES){
+   if(p===q||!b.startsWith(q)||b.slice(q.length)!==rest)continue;
+   if((p==='de'||q==='de')&&rest.length<6)continue;
+   return true;
+  }
+ }
+ return false;
+}
+function distinctConcept(a,b){
+ if(!a||!b||a===b)return false;
+ if(singularise(a)===singularise(b))return false;
+ const fa=familyOf(a),fb=familyOf(b);
+ if(fa!==null&&fb!==null)return fa!==fb;
+ if(suffixChange(a,b)||affixChange(a,b))return true;
+ return false;
+}
+function damerau(a,b){
+ const la=a.length,lb=b.length;
+ if(Math.abs(la-lb)>2)return 9;
+ const dp=Array.from({length:la+1},()=>new Array(lb+1));
+ for(let i=0;i<=la;i++)dp[i][0]=i;
+ for(let j=0;j<=lb;j++)dp[0][j]=j;
+ for(let i=1;i<=la;i++){
+  for(let j=1;j<=lb;j++){
+   const cost=a.charCodeAt(i-1)===b.charCodeAt(j-1)?0:1;
+   let best=dp[i-1][j]+1;
+   if(dp[i][j-1]+1<best)best=dp[i][j-1]+1;
+   if(dp[i-1][j-1]+cost<best)best=dp[i-1][j-1]+cost;
+   if(i>1&&j>1&&a.charCodeAt(i-1)===b.charCodeAt(j-2)&&a.charCodeAt(i-2)===b.charCodeAt(j-1)&&dp[i-2][j-2]+1<best)best=dp[i-2][j-2]+1;
+   dp[i][j]=best;
+  }
+ }
+ return dp[la][lb];
+}
+function isTranspose(a,b){
+ if(a.length!==b.length||!a.length)return false;
+ let i=-1;
+ for(let k=0;k<a.length;k++)if(a.charCodeAt(k)!==b.charCodeAt(k)){i=k;break;}
+ if(i<0||i+1>=a.length)return false;
+ if(a.charCodeAt(i)!==b.charCodeAt(i+1)||a.charCodeAt(i+1)!==b.charCodeAt(i))return false;
+ for(let k=i+2;k<a.length;k++)if(a.charCodeAt(k)!==b.charCodeAt(k))return false;
+ return a.charCodeAt(i)!==a.charCodeAt(i+1);
+}
+function isDuplicateInsert(chunk,target){
+ if(chunk.length!==target.length+1)return false;
+ for(let i=0;i<chunk.length;i++){
+  if(chunk.slice(0,i)+chunk.slice(i+1)!==target)continue;
+  const prev=i>0?chunk.charCodeAt(i-1):0,next=i+1<chunk.length?chunk.charCodeAt(i+1):0,ch=chunk.charCodeAt(i);
+  return ch===prev||ch===next;
+ }
+ return false;
+}
+function maxTokenDist(len){if(len<=2)return 0;if(len<=8)return 1;return 2;}
+function totalBudget(len){return len<=8?1:2;}
+function editAllowed(chunk,target,dist){
+ const len=target.length;
+ if(dist===1){
+  if(isTranspose(chunk,target))return len>=3;
+  if(chunk.length===target.length+1)return len<=3?isDuplicateInsert(chunk,target):len>=4;
+  if(chunk.length+1===target.length)return len>=4;
+  if(chunk.length===target.length)return len>=5;
+  return false;
+ }
+ return dist===2&&len>=9&&chunk.length!==target.length;
+}
+function listedOther(chunk,target){
+ if(!PROTECTED.has(chunk))return false;
+ if(singularise(chunk)===singularise(target))return false;
+ const fa=familyOf(chunk),fb=familyOf(target);
+ if(fa!==null&&fb!==null&&fa===fb)return false;
+ return true;
+}
+function nearerWord(chunk,target,dist){
+ const span=dist;
+ for(let len=chunk.length-span;len<=chunk.length+span;len++){
+  const list=WORD_BUCKETS.get(len);
+  if(!list)continue;
+  for(let i=0;i<list.length;i++){
+   const word=list[i];
+   if(word===target||singularise(word)===singularise(target))continue;
+   const fa=familyOf(word),fb=familyOf(target);
+   if(fa!==null&&fb!==null&&fa===fb)continue;
+   const d=damerau(chunk,word);
+   if(d<dist)return true;
+   if(d<=dist&&distinctConcept(word,target))return true;
+  }
+ }
+ return false;
+}
+function tokenCost(chunk,target){
+ if(chunk===target)return 0;
+ if(!chunk||!target)return -1;
+ if(isFormulaToken(chunk)||isFormulaToken(target)||isQuantityToken(chunk)||isQuantityToken(target))return -1;
+ if(distinctConcept(chunk,target)||listedOther(chunk,target))return -1;
+ const dist=damerau(chunk,target);
+ if(dist<=0||dist>maxTokenDist(target.length)||!editAllowed(chunk,target,dist))return -1;
+ if(nearerWord(chunk,target,dist))return -1;
+ return dist;
+}
+function alignDistance(input,target){
+ const is=input.replace(/ /g,'');
+ const ts=target.replace(/ /g,'');
+ if(!is||!ts)return -1;
+ const budget=totalBudget(ts.length);
+ if(Math.abs(is.length-ts.length)>budget)return -1;
+ if(is===ts)return input===target?0:0.5;
+ const tokens=target.split(' ').filter(Boolean);
+ if(tokens.some(t=>isFormulaToken(t)||isQuantityToken(t)))return -1;
+ const n=is.length,m=tokens.length,INF=99;
+ const dp=Array.from({length:n+1},()=>new Array(m+1).fill(INF));
+ dp[0][0]=0;
+ for(let k=0;k<m;k++){
+  const t=tokens[k],maxd=maxTokenDist(t.length);
+  for(let i=0;i<=n;i++){
+   if(dp[i][k]>=INF)continue;
+   const minL=Math.max(1,t.length-maxd),maxL=Math.min(n-i,t.length+maxd);
+   for(let len=minL;len<=maxL;len++){
+    const cost=tokenCost(is.slice(i,i+len),t);
+    if(cost<0)continue;
+    const next=dp[i][k]+cost;
+    if(next<dp[i+len][k+1])dp[i+len][k+1]=next;
+   }
+  }
+ }
+ const total=dp[n][m];
+ if(total>budget||total>=INF)return -1;
+ return total;
+}
+function extraNegation(input,target){
+ const allowed=new Set(target.split(' ').filter(t=>HARD_NEG.test(t)));
+ const parts=input.split(' ');
+ for(let i=0;i<parts.length;i++)if(HARD_NEG.test(parts[i])&&!allowed.has(parts[i]))return true;
+ return false;
+}
+function isGibberish(s){
+ if(JUNK.has(s))return true;
+ const letters=s.replace(/[^a-z]/g,'');
+ if(!letters)return true;
+ if(/^(.)\1+$/.test(letters)&&letters.length>=3)return true;
+ if(letters.length>=4&&!/[aeiouy]/.test(letters))return true;
+ return false;
+}
+function nearerPhrase(input,dist,allow){
+ const is=input.replace(/ /g,'');
+ const span=Math.floor(dist);
+ for(let len=is.length-span;len<=is.length+span;len++){
+  const list=PHRASE_BUCKETS.get(len);
+  if(!list)continue;
+  for(let i=0;i<list.length;i++){
+   const phrase=list[i];
+   if(allow.has(phrase))continue;
+   if(damerau(is,phrase)<dist)return true;
+  }
+ }
+ return false;
+}
+function gradeAnswer(q,value){
+ const n=normalise(value);
+ if(!n||!q)return {correct:false,typo:false,spelling:''};
+ const aliases=Array.isArray(q.aliases)&&q.aliases.length?q.aliases:(q.answer?[q.answer]:[]);
+ for(let i=0;i<aliases.length;i++){
+  if(normalise(aliases[i])===n)return {correct:true,typo:false,spelling:''};
+ }
+ const open=(q.kind==='short'||q.kind==='fill')&&(!q.options||!q.options.length);
+ if(!open||isNumericNorm(n)||isFormulaNorm(n)||isGibberish(n))return {correct:false,typo:false,spelling:''};
+ const natural=[];
+ for(let i=0;i<aliases.length;i++){
+  const na=normalise(aliases[i]);
+  if(na&&!isNumericNorm(na)&&!isFormulaNorm(na))natural.push(aliases[i]);
+ }
+ if(!natural.length)return {correct:false,typo:false,spelling:''};
+ if(PHRASE_SET.has(n)&&!aliases.some(a=>normalise(a)===n))return {correct:false,typo:false,spelling:''};
+ const allow=new Set(natural.map(a=>normalise(a).replace(/ /g,'')));
+ let best=null;
+ for(let i=0;i<natural.length;i++){
+  const alias=natural[i],na=normalise(alias);
+  if(!na||extraNegation(n,na))continue;
+  const dist=alignDistance(n,na);
+  if(dist<=0)continue;
+  if(nearerPhrase(n,dist,allow))continue;
+  if(!best||dist<best.dist||(dist===best.dist&&alias===q.answer))best={dist,alias};
+ }
+ if(!best)return {correct:false,typo:false,spelling:''};
+ const spelling=normalise(best.alias)===normalise(q.answer)?q.answer:best.alias;
+ return {correct:true,typo:true,spelling};
+}
+function checkAnswer(q,value){return gradeAnswer(q,value).correct;}
+buildLexicon(root.SCIENCE_DATA);
 function shuffle(items,rng){rng=rng||Math.random;const out=items.slice();for(let i=out.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[out[i],out[j]]=[out[j],out[i]];}return out;}
 function blankStore(){return {version:2,stats:{},attempts:[]};}
 function sanitiseStore(raw,bank){
@@ -55,7 +355,7 @@ function selectQuestions(bank,topic,count,stats,rng){
 function markSeen(store,q,now){const old=store.stats[q.id]||{seen:0,correct:0,incorrect:0,lastCorrect:null,lastAnswered:0};store.stats[q.id]=Object.assign({},old,{seen:old.seen+1,lastSeen:now});}
 function recordAnswer(store,q,correct,now){const old=store.stats[q.id]||{seen:1,lastSeen:now,correct:0,incorrect:0};store.stats[q.id]=Object.assign({},old,{correct:old.correct+(correct?1:0),incorrect:old.incorrect+(correct?0:1),lastCorrect:correct,lastAnswered:now});}
 function summarise(results){const byTopic={};for(const r of results){const t=r.question.topic;byTopic[t]=byTopic[t]||{topic:t,total:0,correct:0};byTopic[t].total++;if(r.correct)byTopic[t].correct++;}return {score:results.filter(r=>r.correct).length,total:results.length,topics:Object.values(byTopic)};}
-const api={normalise,checkAnswer,shuffle,selectQuestions,blankStore,sanitiseStore,markSeen,recordAnswer,summarise};root.ScienceLab=api;
+const api={normalise,checkAnswer,gradeAnswer,shuffle,selectQuestions,blankStore,sanitiseStore,markSeen,recordAnswer,summarise};root.ScienceLab=api;
 if(typeof document==='undefined')return;
 const data=root.SCIENCE_DATA,bank=data.questions,topics=data.topics;
 const KEY='melchior-science-lab-v2';let storageOK=true,store;
@@ -92,8 +392,8 @@ function prepare(){feedback=null;choiceOrder=shuffle(queue[index].options);markS
 function renderQuiz(){
  const q=queue[index];const done=results.length;
  app.innerHTML=`<div class="round-meta"><span>${escape(topics[q.topic])}</span><span>${index+1} / ${queue.length}</span></div><progress value="${done}" max="${queue.length}" aria-label="Questions answered"></progress>`+head(escape(q.prompt),q.options.length?(q.kind==='truefalse'?'True or false?':'Choose one answer.'):'Type a short answer. A word, name or number is enough.')+
- `<section class="panel question-panel"><div id="answer-area">${q.options.length?`<div class="answer-options">${choiceOrder.map((v,i)=>`<button type="button" class="answer ${feedback&&v===q.answer?'right-answer':''}" data-answer="${i}" ${feedback?'disabled':''}><span class="letter">${String.fromCharCode(65+i)}</span><span>${escape(v)}</span></button>`).join('')}</div>`:feedback?'':`<form id="answer-form" novalidate><label for="typed-answer">Your answer</label><input id="typed-answer" name="answer" type="text" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" placeholder="Type your answer here" maxlength="160"><button type="submit" class="primary wide" id="check-answer">Check my answer</button><p id="input-note" class="small" aria-live="polite">Case, extra spaces, UK/US spellings and number words are accepted.</p></form>`}</div>
- ${feedback?`<div class="feedback ${feedback.correct?'correct':'incorrect'}" role="status" aria-live="polite"><h2>${feedback.correct?'Correct — nicely done!':'Not quite — let’s lock it in.'}</h2><p class="your-answer">Your answer: ${escape(feedback.given||'I don’t know yet')}</p><p><strong>Correct answer: ${escape(q.answer)}</strong></p><p>${escape(q.explanation)}</p><p class="source">Revision sheets · page ${q.page}</p></div>${button(index+1===queue.length?'See my results':'Next question','next','primary wide')}`:button('I don’t know yet','skip','quiet wide')}
+ `<section class="panel question-panel"><div id="answer-area">${q.options.length?`<div class="answer-options">${choiceOrder.map((v,i)=>`<button type="button" class="answer ${feedback&&v===q.answer?'right-answer':''}" data-answer="${i}" ${feedback?'disabled':''}><span class="letter">${String.fromCharCode(65+i)}</span><span>${escape(v)}</span></button>`).join('')}</div>`:feedback?'':`<form id="answer-form" novalidate><label for="typed-answer">Your answer</label><input id="typed-answer" name="answer" type="text" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" placeholder="Type your answer here" maxlength="160"><button type="submit" class="primary wide" id="check-answer">Check my answer</button><p id="input-note" class="small" aria-live="polite">Case, extra spaces, UK/US spellings and number words are accepted. A small spelling slip still counts — we’ll show the right spelling.</p></form>`}</div>
+ ${feedback?`<div class="feedback ${feedback.correct?'correct':'incorrect'}" role="status" aria-live="polite"><h2>${escape(feedbackHeading(feedback))}</h2><p class="your-answer">Your answer: ${escape(feedback.given||'I don’t know yet')}</p><p><strong>Correct answer: ${escape(q.answer)}</strong></p><p>${escape(q.explanation)}</p><p class="source">Revision sheets · page ${q.page}</p></div>${button(index+1===queue.length?'See my results':'Next question','next','primary wide')}`:button('I don’t know yet','skip','quiet wide')}
  </section><div class="round-footer"><span>${results.filter(r=>r.correct).length} correct · ${results.length} answered</span>${button('End this round','end-early','quiet')}</div>`;
  if(!feedback){app.querySelectorAll('[data-answer]').forEach(el=>el.addEventListener('click',()=>answer(choiceOrder[Number(el.dataset.answer)])));
  const form=document.getElementById('answer-form');if(form)form.addEventListener('submit',e=>{e.preventDefault();const value=document.getElementById('typed-answer').value;if(!value.trim()){document.getElementById('input-note').textContent='Type an answer, or choose “I don’t know yet”.';document.getElementById('typed-answer').focus();return;}answer(value);});action('skip',()=>answer(''));}
@@ -101,7 +401,8 @@ function renderQuiz(){
  action('end-early',()=>{if(confirm('End this round now? Only answers already checked will count.')){if(results.length)finish();else{screen='home';render();}}});
  if(feedback){const next=document.getElementById('next');if(next)next.focus({preventScroll:true});}
 }
-function answer(value){if(feedback)return;const q=queue[index];const correct=checkAnswer(q,value);feedback={question:q,given:String(value).trim(),correct};results.push(feedback);recordAnswer(store,q,correct,Date.now());save();renderQuiz();}
+function feedbackHeading(feedback){if(!feedback.correct)return 'Not quite — let’s lock it in.';if(feedback.typo&&feedback.spelling)return 'Correct! Watch the spelling: '+feedback.spelling;return 'Correct — nicely done!';}
+function answer(value){if(feedback)return;const q=queue[index];const graded=gradeAnswer(q,value);feedback={question:q,given:String(value).trim(),correct:!!graded.correct,typo:!!graded.typo,spelling:graded.spelling||''};results.push(feedback);recordAnswer(store,q,!!graded.correct,Date.now());save();renderQuiz();}
 function finish(){const summary=summarise(results);store.attempts.push({date:Date.now(),label,score:summary.score,total:summary.total,topics:summary.topics});store.attempts=store.attempts.slice(-200);save();screen='end';render();}
 function topicScores(summary){return `<div class="topic-scores">${summary.topics.map(t=>`<div><div class="score-label"><span>${escape(topics[t.topic])}</span><strong>${t.correct}/${t.total}</strong></div><progress value="${t.correct}" max="${t.total}" aria-label="${escape(topics[t.topic])} score"></progress></div>`).join('')}</div>`;}
 function renderEnd(){

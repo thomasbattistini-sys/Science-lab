@@ -1,7 +1,7 @@
 /* Scoped, versioned offline cache. No background sync or analytics. */
 'use strict';
 const PREFIX='science-lab-'+encodeURIComponent(self.registration.scope)+'-';
-const CACHE=PREFIX+'b1923d807364';
+const CACHE=PREFIX+'a91c4e7b2d05';
 const FILES=['./','./index.html','./manifest.webmanifest','./icon-180.png','./icon-192.png','./icon-512.png'];
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES)).then(()=>self.skipWaiting()));});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith(PREFIX)&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()));});
