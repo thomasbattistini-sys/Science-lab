@@ -1,13 +1,15 @@
-/* Melchior's Maths Lab — UI and round engine. Progress lives only in this browser (localStorage). */
+/* Melchior's Maths Lab — UI and round engine. Progress and history live only in this browser (localStorage). */
 (function(root){
 'use strict';
-const M=root.MathsMark,data=root.MATHS_DATA,bank=data.questions,topics=data.topics,days=data.days;
-const KEY='melchior-maths-lab-v1';
+const M=root.MathsMark,X=root.MathsExplain,H=root.MathsHistory,data=root.MATHS_DATA,bank=data.questions;
+const KEY=H.KEY; // 'melchior-maths-lab-v1' (same key as before: old progress is kept and upgraded)
 const MOCK_MINUTES=30;
 const practiceBank=bank.filter(q=>q.day!==6),mockBank=bank.filter(q=>q.day===6);
+const SECTION_KEYS=['u3','u4','mixed'];
 function shuffle(a,rng=Math.random){a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
-function blankStore(){return {version:1,stats:{},rounds:[],mocks:[]};}
-function sanitise(s){const b=blankStore();if(!s||typeof s!=='object')return b;const ids=new Set(bank.map(q=>q.id));if(s.stats&&typeof s.stats==='object')for(const k in s.stats)if(ids.has(k))b.stats[k]=s.stats[k];if(Array.isArray(s.rounds))b.rounds=s.rounds.slice(-60);if(Array.isArray(s.mocks))b.mocks=s.mocks.slice(-30);return b;}
+const ids=new Set(bank.map(q=>q.id));
+function blankStore(){return H.blankStore();}
+function sanitise(s){return H.migrate(s,ids);}
 /* unseen first, then last-time-wrong, then oldest; balanced across topics; more past errors = more weight */
 function selectQuestions(pool,count,stats,rng=Math.random){
  const limit=Math.min(count,pool.length),chosen=[],topicCounts={};
@@ -25,7 +27,8 @@ function selectQuestions(pool,count,stats,rng=Math.random){
  // keep a gentle order: by day then shuffled inside? -> fully shuffled like the science app
  return shuffle(chosen,rng);
 }
-root.MathsLab={selectQuestions,blankStore,sanitise};
+function poolForSection(key){const u=H.SECTIONS[key]&&H.SECTIONS[key].unit;return u?practiceBank.filter(q=>q.unit===u):practiceBank;}
+root.MathsLab={selectQuestions,blankStore,sanitise,poolForSection};
 if(typeof document==='undefined')return;
 
 let storageOK=true,store;
@@ -34,60 +37,62 @@ function save(){try{localStorage.setItem(KEY,JSON.stringify(store));storageOK=tr
 const app=document.getElementById('app');
 const esc=M.esc,P=M.pretty;
 const pct=(n,d)=>d?Math.round(n/d*100):0;
-let screen='home',sel={kind:'day',id:1},count=10,mockFeedback=false;
-let round=null; // {mode,label,queue,index,results,feedback,deadline,startedAt}
+const findQ=id=>bank.find(q=>q.id===id);
+let screen='home',section='u3',count=10,mockFeedback=false;
+let round=null; // {mode,section,label,queue,index,results,feedback,deadline,startedAt,session}
 let timerHandle=null;
 function stat(id){return store.stats[id];}
 function mastered(list){return list.filter(q=>stat(q.id)&&stat(q.id).lastCorrect===true).length;}
 function seen(list){return list.filter(q=>stat(q.id)&&stat(q.id).seen).length;}
-function poolFor(s){if(s.kind==='day')return practiceBank.filter(q=>q.day===s.id);if(s.kind==='topic')return practiceBank.filter(q=>q.topic===s.id);return practiceBank;}
-function labelFor(s){if(s.kind==='day')return days.find(d=>d.id===s.id).title;if(s.kind==='topic')return topics[s.id];return 'Mixed quick quiz';}
 function head(t,sub){return `<div class="section-head"><h1 id="screen-title" tabindex="-1">${t}</h1><p class="lede">${sub}</p></div>`;}
 function on(id,ev,fn){const e=document.getElementById(id);if(e)e.addEventListener(ev,fn);}
-function updateStorageNote(){const e=document.getElementById('storage-note');if(e)e.textContent=storageOK?'Progress is saved on this iPad/browser only. No account, no tracking, no syncing.':'This browser cannot save progress. You can still practise, but progress may be lost when you close the app.';}
-function setNav(){for(const [id,s] of [['nav-home','home'],['nav-mock','mockhome'],['nav-progress','progress']])document.getElementById(id).setAttribute('aria-current',screen===s?'page':'false');}
+function updateStorageNote(){const e=document.getElementById('storage-note');if(e)e.textContent=storageOK?'Progress and history are saved on this iPad/browser only. No account, no tracking, no syncing.':'This browser cannot save progress. You can still practise, but your history may be lost when you close the app.';}
+function setNav(){for(const [id,s] of [['nav-home','home'],['nav-mock','mockhome'],['nav-history','history']])document.getElementById(id).setAttribute('aria-current',screen===s?'page':'false');}
 function render(){
  setNav();
  if(screen!=='quiz'&&timerHandle){clearInterval(timerHandle);timerHandle=null;}
- if(screen==='home')renderHome();else if(screen==='mockhome')renderMockHome();else if(screen==='quiz')renderQuiz();else if(screen==='end')renderEnd();else renderProgress();
+ if(screen==='home')renderHome();else if(screen==='mockhome')renderMockHome();else if(screen==='quiz')renderQuiz();else if(screen==='end')renderEnd();else renderHistory();
  const t=document.getElementById('screen-title');if(t&&screen!=='quiz')t.focus({preventScroll:true});
  if(screen!=='quiz')window.scrollTo(0,0);
 }
-function masteryLine(list){const m=mastered(list);return `${list.length} questions · ${m} mastered`;}
+function daysToGo(){const d=new Date(2026,10,24),n=new Date();n.setHours(0,0,0,0);const k=Math.round((d-n)/86400000);return k>1?`${k} days to go`:k===1?'Tomorrow!':k===0?'Today — good luck!':'';}
+function lastLine(key){const s=H.sectionSummary(store,key);return s.last?`Last: ${H.scoreText(s.last)} · ${H.formatDate(s.last.start)}`:'Not tried yet';}
 function renderHome(){
- const dayCards=days.filter(d=>d.id!==6).map(d=>{const list=practiceBank.filter(q=>q.day===d.id);const on=sel.kind==='day'&&sel.id===d.id;return `<button type="button" class="topic${on?' selected':''}" data-day="${d.id}" aria-pressed="${on}"><strong>${esc(d.title)}</strong><span>${esc(d.date)} · ${masteryLine(list)}</span></button>`;}).join('');
- const topicCards=topics.map((t,i)=>{const list=practiceBank.filter(q=>q.topic===i);if(!list.length)return '';const on=sel.kind==='topic'&&sel.id===i;return `<button type="button" class="topic compact${on?' selected':''}" data-topic="${i}" aria-pressed="${on}"><strong>${esc(t)}</strong><span>${masteryLine(list)}</span></button>`;}).join('');
- const pool=poolFor(sel);
- app.innerHTML=head("Melchior's Maths Lab",`Year 8 Maths Cycle Test 2 · ${esc(data.exam)} · ${bank.length} questions on Units 3 and 4.`)+
- `<section class="panel" aria-labelledby="qq"><div class="eyebrow">Quick start</div><h2 id="qq">Mixed quick quiz</h2><p class="small">Questions from every topic. New questions come first, then the ones you got wrong.</p><div class="choices"><button type="button" class="primary" id="quick10">10 questions</button><button type="button" class="primary" id="quick20">20 questions</button></div></section>`+
- `<section class="panel" aria-labelledby="pd"><div class="eyebrow">Practise</div><h2 id="pd">Practise by day</h2><div class="topic-grid">${dayCards}</div><h3>…or by topic</h3><div class="topic-grid">${topicCards}</div>
- <h3>How many questions?</h3><div class="choices">${[10,20,0].map(n=>`<button type="button" class="number${count===n?' selected':''}" data-count="${n}" aria-pressed="${count===n}">${n||'All'}</button>`).join('')}</div>
- <button type="button" class="primary wide" id="start">Start: ${esc(labelFor(sel))} (${count?Math.min(count,pool.length):pool.length} questions)</button></section>`+
+ const cards=SECTION_KEYS.map(k=>{const sec=H.SECTIONS[k],list=poolForSection(k),sel=section===k;
+  return `<button type="button" class="topic section-card${sel?' selected':''}" data-section="${k}" aria-pressed="${sel}"><strong>${esc(sec.title)}</strong><span>${list.length} questions · ${mastered(list)} mastered</span><span class="last">${esc(lastLine(k))}</span></button>`;}).join('');
+ const pool=poolForSection(section),n=count?Math.min(count,pool.length):pool.length;
+ const recent=H.newestFirst(store)[0];
+ const dg=daysToGo();
+ app.innerHTML=head("Melchior's Maths Lab",`Year 8 Maths Cycle Test 2 · ${esc(data.exam)}${dg?' · '+dg:''}`)+
+ `<section class="panel" aria-labelledby="pd"><div class="eyebrow">Practise</div><h2 id="pd">1. Choose a section</h2><div class="section-grid">${cards}</div>
+ <h3>2. How many questions?</h3><div class="choices">${[10,20,0].map(c=>`<button type="button" class="number${count===c?' selected':''}" data-count="${c}" aria-pressed="${count===c}">${c||'All'}</button>`).join('')}</div>
+ <button type="button" class="primary wide" id="start">Start: ${esc(H.SECTIONS[section].title)} (${n} questions)</button></section>`+
  `<section class="panel" aria-labelledby="mk"><div class="eyebrow">Exam practice</div><h2 id="mk">30-minute mock test</h2><p class="small">${mockBank.length} questions, 30 marks, timed like the real test.</p><button type="button" id="go-mock">Go to the mock test</button></section>`+
- `<div class="how"><h3>How it works</h3><ul><li>Type short answers. Use the buttons under the box for powers and brackets, e.g. <b>x²</b> or <b>3(x + 4)</b>.</li><li>Units are optional: 24, 24 cm² and 24 cm2 all count.</li><li>Algebra is checked properly: 6 + 3x is the same as 3x + 6, but “factorise fully” needs the full HCF outside the bracket.</li><li>After each answer you see the method. Missed questions come back later.</li></ul></div>`;
- app.querySelectorAll('[data-day]').forEach(b=>b.addEventListener('click',()=>{sel={kind:'day',id:Number(b.dataset.day)};renderKeep();}));
- app.querySelectorAll('[data-topic]').forEach(b=>b.addEventListener('click',()=>{sel={kind:'topic',id:Number(b.dataset.topic)};renderKeep();}));
+ `<section class="panel" aria-labelledby="hs"><div class="eyebrow">My history</div><h2 id="hs">${recent?'Last session':'No sessions yet'}</h2>${recent?`<p>${esc(H.formatDate(recent.start))} · ${esc(recent.label)} · <b>${esc(H.scoreText(recent))}</b>${recent.complete?'':' · stopped early'}</p>`:'<p class="small">Every session you do is saved with its date and score.</p>'}<button type="button" id="go-history">See my history</button></section>`+
+ `<div class="how"><h3>How it works</h3><ul><li>Type short answers. Use the buttons under the box for powers and brackets, e.g. <b>x²</b> or <b>3(x + 4)</b>.</li><li>Units are optional: 24, 24 cm² and 24 cm2 all count.</li><li>Algebra is checked properly: 6 + 3x is the same as 3x + 6, but “factorise fully” needs the full HCF outside the bracket.</li><li>If an answer is wrong you see why, the method step by step, and another example to practise the same skill.</li><li>Every session is saved in <b>My history</b> with the date, score and the questions you missed.</li></ul></div>`;
+ app.querySelectorAll('[data-section]').forEach(b=>b.addEventListener('click',()=>{section=b.dataset.section;renderKeep();}));
  app.querySelectorAll('[data-count]').forEach(b=>b.addEventListener('click',()=>{count=Number(b.dataset.count);renderKeep();}));
- on('start','click',()=>{const pool=poolFor(sel);startRound('practice',labelFor(sel),selectQuestions(pool,count||pool.length,store.stats));});
- on('quick10','click',()=>startRound('quick','Mixed quick quiz',selectQuestions(practiceBank,10,store.stats)));
- on('quick20','click',()=>startRound('quick','Mixed quick quiz',selectQuestions(practiceBank,20,store.stats)));
+ on('start','click',()=>{const p=poolForSection(section);startRound('practice',section,H.SECTIONS[section].title,selectQuestions(p,count||p.length,store.stats));});
  on('go-mock','click',()=>{screen='mockhome';render();});
+ on('go-history','click',()=>{screen='history';render();});
 }
 function renderKeep(){const y=window.scrollY;renderHome();window.scrollTo(0,y);}
 function renderMockHome(){
- const last=store.mocks.slice(-3).reverse();
+ const last=H.newestFirst(store).filter(s=>s.section==='mock').slice(0,3);
  app.innerHTML=head('Mock test',`Year 8 Maths Cycle Test 2 practice paper · ${mockBank.length} questions · 30 marks · ${MOCK_MINUTES} minutes.`)+
- `<section class="panel"><h2>Before you start</h2><ul class="small"><li>Have paper and a pencil ready for working out. No calculator.</li><li>The timer starts when you press Start. When the time is up, the test ends and unanswered questions score 0.</li><li>Each question shows its marks. In the app a question scores all its marks when the final answer is right.</li></ul>
- <label class="check"><input type="checkbox" id="fb" ${mockFeedback?'checked':''}> Show the answer and method after each question (practice style)</label>
- <p class="small">Leave this off for real exam conditions: you will see every answer and method at the end.</p>
+ `<section class="panel"><h2>Before you start</h2><ul class="small"><li>Have paper, a pencil and your calculator ready (calculator allowed, as in the real test).</li><li>The timer starts when you press Start. When the time is up, the test ends and unanswered questions score 0.</li><li>Each question shows its marks. In the app a question scores all its marks when the final answer is right.</li></ul>
+ <label class="check"><input type="checkbox" id="fb" ${mockFeedback?'checked':''}> Show the answer and explanation after each question (practice style)</label>
+ <p class="small">Leave this off for real exam conditions: you will see every answer, explanation and extra example at the end.</p>
  <button type="button" class="primary wide" id="start-mock">Start the 30-minute mock</button></section>`+
- (last.length?`<section class="panel"><h2>Recent mocks</h2>${last.map(m=>`<p>${esc(displayDate(m.at))}: <b>${m.marks}/${m.total}</b> marks · ${fmtTime(m.seconds)}</p>`).join('')}</section>`:'');
+ (last.length?`<section class="panel"><h2>Recent mocks</h2>${last.map(m=>`<p>${esc(H.formatDate(m.start))}: <b>${esc(H.scoreText(m))}</b> · ${esc(H.formatDuration(m.seconds))}${m.complete?'':' · stopped early'}</p>`).join('')}</section>`:'');
  on('fb','change',e=>{mockFeedback=e.target.checked;});
- on('start-mock','click',()=>startRound('mock','Mock test',mockBank.slice(),{feedback:mockFeedback}));
+ on('start-mock','click',()=>startRound('mock','mock','Mock test',mockBank.slice(),{feedback:mockFeedback}));
 }
-function startRound(mode,label,queue,opt={}){
+function startRound(mode,sec,label,queue,opt={}){
  if(!queue.length)return;
- round={mode,label,queue,index:0,results:[],feedback:null,showFeedback:mode!=='mock'||!!opt.feedback,startedAt:Date.now(),deadline:mode==='mock'?Date.now()+MOCK_MINUTES*60000:null,choiceOrder:null};
+ const now=Date.now();
+ round={mode,section:sec,label,queue,index:0,results:[],feedback:null,showFeedback:mode!=='mock'||!!opt.feedback,startedAt:now,deadline:mode==='mock'?now+MOCK_MINUTES*60000:null};
+ round.session=H.newSession({mode,section:sec,label,planned:queue.length,totalMarks:mode==='mock'?queue.reduce((s,q)=>s+(q.marks||1),0):0,now});
  screen='quiz';render();
 }
 function fmtTime(sec){sec=Math.max(0,Math.round(sec));return Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0');}
@@ -98,40 +103,62 @@ function tickTimer(){
  if(left<=0){clearInterval(timerHandle);timerHandle=null;timeUp();}
 }
 function timeUp(){
- // remaining questions score 0
- for(let i=round.results.length;i<round.queue.length;i++){const q=round.queue[i];round.results.push({q,given:'',correct:false,res:{correct:false,message:'Not answered (time up).'},skipped:true});}
+ for(let i=round.results.length;i<round.queue.length;i++){const q=round.queue[i];round.results.push({q,given:'',correct:false,res:{correct:false,message:'Not answered (time up).'},skipped:true,unanswered:true});}
  round.timeUp=true;finish();
 }
 function figHTML(q){return q.fig?`<figure class="diagram"><img src="./fig/${esc(q.fig)}" alt="Diagram for this question (not drawn to scale)"><figcaption>Not drawn to scale</figcaption></figure>`:'';}
 const KEYS=['^','²','³','(',')','x','y','a','b'];
+const ans=q=>P(q.a)+(q.units&&q.form==='num'?' '+esc(q.units):'');
+const mathHTML=s=>P(String(s).replace(/\*/g,'×'));
+function stepHTML(st){return `<li>${st.t?esc(st.t):''}${st.t&&st.m?': ':''}${st.m?`<span class="m">${mathHTML(st.m)}</span>`:''}</li>`;}
+/* (a) why it is wrong, (b) method for this question, (c) another worked example */
+function explainHTML(q,given,res,skipped){
+ const d=X.diagnose(q,skipped?'':given,res);
+ const ex=X.exampleFor(q);
+ const steps=X.methodSteps(q);
+ let why;
+ if(skipped||d.blank)why=`<p>No answer was given, so here is how to do it.</p>`;
+ else if(d.why.length)why=`<ul>${d.why.map(w=>`<li>${P(w.text)}</li>`).join('')}</ul>`+(d.specific?'':`<p class="small">Common slips with this skill: ${d.mistakes.map(esc).join(' ')}</p>`);
+ else why=`<p>I can't pin down one exact slip, so compare your working with the method below. Common slips with this skill:</p><ul>${d.mistakes.map(m=>`<li>${esc(m)}</li>`).join('')}</ul>`;
+ const exAns=P(ex.a)+(ex.full?' — '+P(ex.full):'')+(ex.units?' '+esc(ex.units):'');
+ return `<div class="explain">
+ <section class="why"><h3><span class="tag">1</span> Why it's not right</h3>${why}<p class="rule"><b>Key rule (${esc(d.title)}):</b> ${esc(d.rule)}</p></section>
+ <section class="method"><h3><span class="tag">2</span> Method for this question</h3><ol>${steps.map(s=>`<li>${mathHTML(s)}</li>`).join('')}</ol></section>
+ <section class="example"><h3><span class="tag">3</span> Another example: ${esc(ex.title)}</h3><p class="exq">${mathHTML(ex.q)}</p><ol>${ex.steps.map(stepHTML).join('')}</ol><p>Answer: <b>${exAns}</b></p></section>
+ </div>`;
+}
 function renderQuiz(){
  const r=round,q=r.queue[r.index],n=r.queue.length,fb=r.feedback;
  const score=r.results.filter(x=>x.correct).length;
  const marks=q.marks?` · ${q.marks} mark${q.marks>1?'s':''}`:'';
  let meta=`<div class="round-meta"><span>${esc(r.label)}</span><span>Question ${r.index+1} of ${n}${marks}</span>${r.mode==='mock'?`<span id="timer" class="timer">⏱ ${fmtTime((r.deadline-Date.now())/1000)}</span>`:`<span>Score ${score}/${r.results.length}</span>`}</div><progress max="${n}" value="${r.index+(fb?1:0)}" aria-label="Round progress"></progress>`;
  let body;
- const topicLine=`<div class="eyebrow">${esc(topics[q.topic])}</div>`;
+ const unitLine=`<div class="eyebrow">${esc(q.unit===3?H.SECTIONS.u3.title:H.SECTIONS.u4.title)}</div>`;
  if(q.form==='mcq'){
   body=`<div class="answer-options">${q.choices.map((c,i)=>{let cls='answer';if(fb){if(c===q.a)cls+=' right-answer';else if(c===fb.given)cls+=' wrong-answer';}return `<button type="button" class="${cls}" data-choice="${esc(c)}" ${fb?'disabled':''}><span class="letter">${'AB'[i]||i+1}</span><span>${P(c)}</span></button>`;}).join('')}</div>`;
  }else{
   const isNum=q.form==='num';
   body=`<form id="answer-form" autocomplete="off"><label for="ans">Your answer${q.units&&isNum?` <span class="small">(units: ${esc(q.units)}, optional)</span>`:''}</label>
   <input id="ans" name="ans" type="text" ${isNum?'inputmode="text"':''} autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="${fb?'next':'done'}" value="${fb?esc(fb.given):''}" ${fb?'readonly':''} placeholder="${isNum?'e.g. 24':q.form==='index'?'e.g. 5^7':'e.g. 3x² + 2x'}">
-  <div class="preview" id="preview" aria-live="polite">${fb?'':''}</div>
+  <div class="preview" id="preview" aria-live="polite"></div>
   ${fb?'':`<div class="keys" role="group" aria-label="Maths keys">${KEYS.map(k=>`<button type="button" class="key" data-key="${esc(k)}" aria-label="Insert ${k==='^'?'power sign':k==='²'?'squared sign':k==='³'?'cubed sign':k}" title="${k==='²'?'adds ²':k==='³'?'adds ³':k==='^'?'power: type x^5':''}">${k==='²'?'x²':k==='³'?'x³':esc(k)}</button>`).join('')}<button type="button" class="key" data-key="⌫" aria-label="Delete">⌫</button></div>`}
   ${fb?'':`<div class="actions"><button type="submit" class="primary" id="check">Check answer</button><button type="button" class="quiet" id="dunno">${r.showFeedback?'Show me the answer':'Skip'}</button></div>`}</form>`;
  }
  let fbHTML='';
  if(fb&&r.showFeedback){
   const res=fb.res;
-  fbHTML=`<div class="feedback ${fb.correct?'correct':'incorrect'}" role="status"><h2>${fb.correct?'Correct!':fb.skipped?'Here is the answer':'Not quite'}</h2>
-  ${res.message?`<p><b>${esc(res.message)}</b></p>`:''}${res.note?`<p>${esc(res.note)}</p>`:''}
-  ${fb.given&&q.form!=='mcq'?`<p class="your-answer">You wrote: ${M.previewText(fb.given)}</p>`:''}
-  <p>Answer: <b>${P(q.a)}${q.units&&q.form==='num'?' '+esc(q.units):''}</b></p><p>${P(q.ex)}</p></div>`;
+  if(fb.correct){
+   fbHTML=`<div class="feedback correct" role="status"><h2>Correct!</h2>${res.message?`<p><b>${esc(res.message)}</b></p>`:''}${res.note?`<p>${esc(res.note)}</p>`:''}
+   ${fb.given&&q.form!=='mcq'?`<p class="your-answer">You wrote: ${M.previewText(fb.given)}</p>`:''}<p>Answer: <b>${ans(q)}</b></p><p>${mathHTML(X.methodText(q))}</p></div>`;
+  }else{
+   fbHTML=`<div class="feedback incorrect" role="status"><h2>${fb.skipped?'Here is the answer':'Not quite'}</h2>
+   ${fb.given&&q.form!=='mcq'?`<p class="your-answer">You wrote: ${M.previewText(fb.given)}</p>`:''}${q.form==='mcq'&&fb.given?`<p class="your-answer">You chose: ${P(fb.given)}</p>`:''}
+   <p>Correct answer: <b>${ans(q)}</b></p>${explainHTML(q,fb.given,res,fb.skipped)}</div>`;
+  }
  }
  const nextBtn=fb?`<button type="button" class="primary wide" id="next">${r.index+1<n?'Next question':'See results'}</button>`:'';
- app.innerHTML=meta+`<section class="panel question-panel" data-qid="${q.id}">${topicLine}<h1 id="screen-title" tabindex="-1" class="question">${P(q.q)}</h1>${figHTML(q)}${body}${fbHTML}${nextBtn}</section>`+
- (r.mode!=='mock'||r.index>0?`<div class="round-footer"><span>${r.mode==='mock'?'Answers are saved as you go.':'Checked answers are saved in your progress.'}</span><button type="button" class="quiet" id="quit">${r.mode==='mock'?'Finish test now':'End round'}</button></div>`:`<div class="round-footer"><span>Good luck!</span><button type="button" class="quiet" id="quit">Finish test now</button></div>`);
+ app.innerHTML=meta+`<section class="panel question-panel" data-qid="${q.id}">${unitLine}<h1 id="screen-title" tabindex="-1" class="question">${P(q.q)}</h1>${figHTML(q)}${body}${fbHTML}${nextBtn}</section>`+
+ (r.mode!=='mock'||r.index>0?`<div class="round-footer"><span>${r.mode==='mock'?'Answers are saved as you go.':'Every answer is saved in My history.'}</span><button type="button" class="quiet" id="quit">${r.mode==='mock'?'Finish test now':'End round'}</button></div>`:`<div class="round-footer"><span>Good luck!</span><button type="button" class="quiet" id="quit">Finish test now</button></div>`);
  if(r.mode==='mock'){if(!timerHandle)timerHandle=setInterval(tickTimer,1000);tickTimer();}
  const input=document.getElementById('ans');
  if(input&&!fb){
@@ -152,7 +179,7 @@ function renderQuiz(){
  }
  if(q.form==='mcq'&&!fb)app.querySelectorAll('[data-choice]').forEach(b=>b.addEventListener('click',()=>submit(b.dataset.choice)));
  if(fb){const nb=document.getElementById('next');nb.addEventListener('click',next);nb.focus({preventScroll:true});}
- on('quit','click',()=>{if(r.mode==='mock'){if(confirm('Finish the mock now? Unanswered questions will score 0.'))timeUp();}else{if(r.results.length===0||confirm('End this round now? Your checked answers are already saved.'))finish();}});
+ on('quit','click',()=>{if(r.mode==='mock'){if(confirm('Finish the mock now? Unanswered questions will score 0.'))timeUp();}else{if(r.results.length===0||confirm('End this round now? Your answers so far are saved in My history.'))finish();}});
  if(!fb)window.scrollTo(0,0);
 }
 function submit(given,skipped=false){
@@ -161,54 +188,69 @@ function submit(given,skipped=false){
  const res=skipped?{correct:false}:M.grade(q,given);
  const now=Date.now(),old=store.stats[q.id]||{seen:0,correct:0,incorrect:0};
  store.stats[q.id]={seen:(old.seen||0)+1,correct:(old.correct||0)+(res.correct?1:0),incorrect:(old.incorrect||0)+(res.correct?0:1),lastCorrect:!!res.correct,lastSeen:now};
- save();
  const item={q,given:skipped?'':given,correct:!!res.correct,res,skipped};
  r.results.push(item);
+ H.syncSession(store,r.session,r.results,{now}); // saved straight away, so a session left half-way is kept
+ save();
  if(r.showFeedback){r.feedback=item;renderQuiz();const f=document.querySelector('.feedback');if(f)f.scrollIntoView({block:'nearest',behavior:'smooth'});}
  else next(true);
 }
 function next(){const r=round;r.feedback=null;if(r.index+1<r.queue.length){r.index++;renderQuiz();}else finish();}
 function finish(){
  const r=round;if(timerHandle){clearInterval(timerHandle);timerHandle=null;}
- r.seconds=(Date.now()-r.startedAt)/1000;
- const score=r.results.filter(x=>x.correct).length;
- if(r.mode==='mock'){
-  const marks=r.results.reduce((s,x)=>s+(x.correct?(x.q.marks||1):0),0),total=r.queue.reduce((s,q)=>s+(q.marks||1),0);
-  r.marks=marks;r.total=total;store.mocks.push({at:Date.now(),marks,total,seconds:Math.min(r.seconds,MOCK_MINUTES*60)});
- }
- if(r.results.length)store.rounds.push({at:Date.now(),mode:r.mode,label:r.label,score,total:r.results.length});
+ const now=Date.now();
+ r.seconds=(now-r.startedAt)/1000;
+ if(r.mode==='mock'){r.marks=r.results.reduce((s,x)=>s+(x.correct?(x.q.marks||1):0),0);r.total=r.queue.reduce((s,q)=>s+(q.marks||1),0);}
+ const complete=r.mode==='mock'||r.results.length>=r.queue.length;
+ if(r.results.length)H.syncSession(store,r.session,r.results,{now:r.mode==='mock'?Math.min(now,r.startedAt+MOCK_MINUTES*60000):now,complete,timeUp:!!r.timeUp});
  save();screen='end';render();
 }
-function displayDate(t){try{return new Date(t).toLocaleString('en-GB',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});}catch(e){return new Date(t).toString();}}
 function renderEnd(){
  const r=round,score=r.results.filter(x=>x.correct).length,total=r.results.length;
- const byTopic={};for(const x of r.results){const t=x.q.topic;byTopic[t]=byTopic[t]||{c:0,n:0};byTopic[t].n++;if(x.correct)byTopic[t].c++;}
+ const byUnit={};for(const x of r.results){const t=x.q.unit;byUnit[t]=byUnit[t]||{c:0,n:0};byUnit[t].n++;if(x.correct)byUnit[t].c++;}
  const missed=r.mode==='mock'&&!r.showFeedback?r.results:r.results.filter(x=>!x.correct);
- const big=r.mode==='mock'?`<div class="big-score">${r.marks}<span>/${r.total} marks</span></div><p class="percent">${pct(r.marks,r.total)}% · ${score} of ${r.queue.length} questions right · time used ${fmtTime(Math.min(r.seconds,MOCK_MINUTES*60))}${r.timeUp?' (time up)':''}</p>`:`<div class="big-score">${score}<span>/${total}</span></div><p class="percent">${pct(score,total)}% correct</p>`;
+ const big=r.mode==='mock'?`<div class="big-score">${r.marks}<span>/${r.total} marks</span></div><p class="percent">${pct(r.marks,r.total)}% · ${score} of ${r.queue.length} questions right · time used ${fmtTime(Math.min(r.seconds,MOCK_MINUTES*60))}${r.timeUp?' (time up)':''}</p>`:`<div class="big-score">${score}<span>/${total}</span></div><p class="percent">${pct(score,total)}% correct${total<r.queue.length?` · ${total} of ${r.queue.length} questions answered`:''}</p>`;
  const msg=pct(r.mode==='mock'?r.marks:score,r.mode==='mock'?r.total:total);
  app.innerHTML=head(r.mode==='mock'?'Mock test finished':'Round complete',esc(r.label)+' · '+(msg>=85?'Excellent work!':msg>=65?'Good work. Look at the corrections below.':'Keep going: go through the corrections, then try again.'))+
- `<section class="panel">${big}<div class="topic-scores">${Object.entries(byTopic).map(([t,v])=>`<div class="score-label"><span>${esc(topics[t])}</span><span>${v.c}/${v.n}</span></div><progress max="${v.n}" value="${v.c}"></progress>`).join('')}</div>
- <div class="actions"><button type="button" class="primary" id="again">${r.mode==='mock'?'Back to the mock page':'Another round'}</button>${missed.some(x=>!x.correct)&&r.mode!=='mock'?'<button type="button" id="retry">Retry the ones I missed</button>':''}<button type="button" id="home">Home</button></div></section>`+
- (missed.length?`<h2>${r.mode==='mock'&&!r.showFeedback?'All answers and methods':'Corrections'}</h2><div class="corrections">${missed.map(x=>`<article class="correction ${x.correct?'ok':''}"><div class="eyebrow">${esc(topics[x.q.topic])}${x.q.marks?` · ${x.correct?x.q.marks:0}/${x.q.marks} marks`:''}</div><h3>${P(x.q.q)}</h3>${figHTML(x.q)}<p class="your-answer">${x.given?'You wrote: '+M.previewText(x.given):'No answer'}${x.correct?' ✓':' ✗'}</p>${x.res&&x.res.message&&!x.correct?`<p><b>${esc(x.res.message)}</b></p>`:''}<p>Answer: <b>${P(x.q.a)}${x.q.units&&x.q.form==='num'?' '+esc(x.q.units):''}</b></p><p>${P(x.q.ex)}</p></article>`).join('')}</div>`:'<p>No corrections — everything was right!</p>');
- on('again','click',()=>{if(r.mode==='mock'){screen='mockhome';render();}else if(r.mode==='quick')startRound('quick','Mixed quick quiz',selectQuestions(practiceBank,r.queue.length,store.stats));else{const pool=poolFor(sel);startRound('practice',labelFor(sel),selectQuestions(pool,count||pool.length,store.stats));}});
- on('retry','click',()=>startRound(r.mode,r.label+' (retry)',shuffle(r.results.filter(x=>!x.correct).map(x=>x.q))));
+ `<section class="panel">${big}<div class="topic-scores">${Object.entries(byUnit).map(([u,v])=>`<div class="score-label"><span>${esc(u==='3'?H.SECTIONS.u3.title:H.SECTIONS.u4.title)}</span><span>${v.c}/${v.n}</span></div><progress max="${v.n}" value="${v.c}"></progress>`).join('')}</div>
+ <p class="small saved-note">✓ Saved in My history · ${esc(H.formatDate(r.session.start))}</p>
+ <div class="actions"><button type="button" class="primary" id="again">${r.mode==='mock'?'Back to the mock page':'Another round'}</button>${missed.some(x=>!x.correct)&&r.mode!=='mock'?'<button type="button" id="retry">Retry the ones I missed</button>':''}<button type="button" id="hist">My history</button><button type="button" id="home">Home</button></div></section>`+
+ (missed.length?`<h2>${r.mode==='mock'&&!r.showFeedback?'All answers and methods':'Corrections'}</h2><div class="corrections">${missed.map(x=>`<article class="correction ${x.correct?'ok':''}"><div class="eyebrow">${esc(X.diagnose(x.q,'',null).title)}${x.q.marks?` · ${x.correct?x.q.marks:0}/${x.q.marks} marks`:''}</div><h3>${P(x.q.q)}</h3>${figHTML(x.q)}<p class="your-answer">${x.given?'You wrote: '+M.previewText(x.given):'No answer'}${x.correct?' ✓':' ✗'}</p>${x.correct?`<p>Answer: <b>${ans(x.q)}</b></p><p>${mathHTML(X.methodText(x.q))}</p>`:`<p>Correct answer: <b>${ans(x.q)}</b></p>${explainHTML(x.q,x.given,x.res,x.skipped)}`}</article>`).join('')}</div>`:'<p>No corrections — everything was right!</p>');
+ on('again','click',()=>{if(r.mode==='mock'){screen='mockhome';render();}else{const p=poolForSection(r.section);startRound('practice',r.section,H.SECTIONS[r.section].title,selectQuestions(p,count||p.length,store.stats));}});
+ on('retry','click',()=>startRound('retry',r.section,H.SECTIONS[r.section].short+' · retry of missed questions',shuffle(r.results.filter(x=>!x.correct).map(x=>x.q))));
+ on('hist','click',()=>{screen='history';render();});
  on('home','click',()=>{screen='home';render();});
 }
-function renderProgress(){
- const all=practiceBank,s=seen(all),m=mastered(all);
- const answered=Object.values(store.stats).reduce((a,x)=>a+(x.correct||0)+(x.incorrect||0),0),right=Object.values(store.stats).reduce((a,x)=>a+(x.correct||0),0);
- const row=(title,list)=>{const mm=mastered(list),ss=seen(list);return `<div class="mastery"><h3>${esc(title)}</h3><progress max="${list.length}" value="${mm}"></progress><p class="small">${mm}/${list.length} mastered · ${ss} tried</p></div>`;};
- app.innerHTML=head('Progress','Mastered = answered correctly the last time it came up.')+
- `<section class="panel"><div class="overview"><div><strong>${m}<span>/${all.length}</span></strong><p>questions mastered</p></div><div><strong>${s}<span>/${all.length}</span></strong><p>questions tried</p></div><div><strong>${pct(right,answered)}<span>%</span></strong><p>of ${answered} answers correct</p></div></div>
- <h2>By day</h2><div class="mastery-grid">${days.filter(d=>d.id!==6).map(d=>row(d.title,all.filter(q=>q.day===d.id))).join('')}</div>
- <h2>By topic</h2><div class="mastery-grid">${topics.map((t,i)=>{const l=all.filter(q=>q.topic===i);return l.length?row(t,l):'';}).join('')}</div></section>`+
- `<section class="panel"><h2>Mock tests</h2>${store.mocks.length?`<div class="table-wrap"><table><thead><tr><th>Date</th><th>Time used</th><th>Marks</th></tr></thead><tbody>${store.mocks.slice().reverse().map(x=>`<tr><td>${esc(displayDate(x.at))}</td><td>${fmtTime(x.seconds)}</td><td>${x.marks}/${x.total}</td></tr>`).join('')}</tbody></table></div>`:'<p class="small">No mock yet.</p>'}</section>`+
- `<section class="panel"><h2>Recent rounds</h2>${store.rounds.length?`<div class="table-wrap"><table><thead><tr><th>Date</th><th>Round</th><th>Score</th></tr></thead><tbody>${store.rounds.slice(-15).reverse().map(x=>`<tr><td>${esc(displayDate(x.at))}</td><td>${esc(x.label)}</td><td>${x.score}/${x.total}</td></tr>`).join('')}</tbody></table></div>`:'<p class="small">No rounds yet.</p>'}
- <div class="actions"><button type="button" class="quiet" id="reset">Reset all maths progress</button></div></section>`;
- on('reset','click',()=>{if(confirm('Delete all Maths Lab progress on this device? (Science Lab progress is not affected.)')){store=blankStore();save();render();}});
+function sessionHTML(s){
+ const wrong=s.wrong.map(w=>({w,q:findQ(w.id)})).filter(x=>x.q);
+ const cls=H.pct(s)>=85?'good':H.pct(s)>=65?'ok':'low';
+ return `<li class="session"><div class="session-top"><span class="when">${esc(H.formatDate(s.start))}</span><span class="score ${cls}">${esc(H.scoreText(s))}</span></div>
+ <div class="session-meta">${esc(s.label)} · ${s.answered}${s.planned?' of '+s.planned:''} answered · ${esc(H.formatDuration(s.seconds))}${s.complete?'':' · <span class="badge">'+esc(H.statusText(s))+'</span>'}${s.legacy?' · <span class="badge">'+esc(H.statusText(s))+'</span>':''}</div>
+ ${wrong.length?`<details><summary>${wrong.length} question${wrong.length>1?'s':''} to review</summary><ul class="wrong-list">${wrong.map(({w,q})=>`<li><span class="wq">${P(q.q)}</span><span class="small">${w.skipped||!w.given?'No answer':'You wrote: '+M.previewText(w.given)} · Answer: <b>${ans(q)}</b></span></li>`).join('')}</ul></details>`:(s.legacy?'':'<p class="small allright">No mistakes ✓</p>')}</li>`;
 }
-function navigate(dest){if(screen==='quiz'&&round&&round.results.length<round.queue.length){if(!confirm(round.mode==='mock'?'Leave the mock? It will not be scored.':'Leave this round? Checked answers stay in your progress.'))return;if(timerHandle){clearInterval(timerHandle);timerHandle=null;}}screen=dest;render();}
-on('nav-home','click',()=>navigate('home'));on('nav-mock','click',()=>navigate('mockhome'));on('nav-progress','click',()=>navigate('progress'));
+function renderHistory(){
+ const list=H.newestFirst(store);
+ const card=k=>{const s=H.sectionSummary(store,k),sec=H.SECTIONS[k];const pool=k==='mock'?mockBank:poolForSection(k);
+  return `<div class="mastery"><h3>${esc(sec.title)}</h3>${s.count?`<p class="small"><b>Last:</b> ${esc(H.scoreText(s.last))} · ${esc(H.formatDate(s.last.start))}<br><b>Best:</b> ${s.best?esc(H.scoreText(s.best))+' · '+esc(H.formatDate(s.best.start)):'—'}<br>${s.count} session${s.count>1?'s':''}</p>`:'<p class="small">No sessions yet.</p>'}
+  ${k==='mock'?'':`<progress max="${pool.length}" value="${mastered(pool)}" aria-label="Questions mastered"></progress><p class="small">${mastered(pool)}/${pool.length} questions mastered · ${seen(pool)} tried</p>`}</div>`;};
+ const answered=list.reduce((a,s)=>a+s.answered,0),right=list.reduce((a,s)=>a+s.correct,0);
+ app.innerHTML=head('My history','Every session on this iPad, newest first: date, section, score, time taken and the questions to review.')+
+ `<section class="panel"><div class="overview"><div><strong>${list.length}</strong><p>sessions</p></div><div><strong>${answered}</strong><p>questions answered</p></div><div><strong>${pct(right,answered)}<span>%</span></strong><p>answers correct</p></div></div>
+ <h2>Progress by section</h2><div class="mastery-grid">${['u3','u4','mixed','mock'].map(card).join('')}</div></section>`+
+ `<section class="panel"><h2>Sessions</h2>${list.length?`<ol class="sessions">${list.map(sessionHTML).join('')}</ol>`:'<p class="small">No sessions yet. Choose a section on the Practise page to start.</p>'}</section>`+
+ `<section class="panel"><h2>For a parent</h2><p class="small">Copy the whole history as text (dates, scores and every mistake) to paste into a message or email.</p>
+ <div class="actions"><button type="button" class="primary" id="copy">Copy history as text</button>${navigator.share?'<button type="button" id="share">Share…</button>':''}</div><p class="small" id="copy-status" aria-live="polite"></p>
+ <details><summary>Show the text</summary><textarea id="export" readonly rows="10">${esc(H.exportText(store,findQ))}</textarea></details>
+ <div class="actions"><button type="button" class="quiet" id="reset">Reset all maths progress and history</button></div></section>`;
+ const text=()=>H.exportText(store,findQ);
+ on('copy','click',async()=>{const st=document.getElementById('copy-status');const t=text();
+  try{await navigator.clipboard.writeText(t);st.textContent='Copied ✓ — paste it into a message or email.';}
+  catch(e){const ta=document.getElementById('export');ta.closest('details').open=true;ta.value=t;ta.focus();ta.select();try{document.execCommand('copy');st.textContent='Copied ✓';}catch(e2){st.textContent='Select the text below and copy it.';}}});
+ on('share','click',()=>{navigator.share({title:"Melchior's Maths Lab history",text:text()}).catch(()=>{});});
+ on('reset','click',()=>{if(confirm('Delete all Maths Lab progress AND history on this device? (Science Lab progress is not affected.)')){store=blankStore();save();render();}});
+}
+function navigate(dest){if(screen==='quiz'&&round&&round.results.length<round.queue.length){if(!confirm(round.mode==='mock'?'Leave the mock? It will be saved in My history as stopped early.':'Leave this round? Your answers so far are saved in My history.'))return;if(timerHandle){clearInterval(timerHandle);timerHandle=null;}}screen=dest;render();}
+on('nav-home','click',()=>navigate('home'));on('nav-mock','click',()=>navigate('mockhome'));on('nav-history','click',()=>navigate('history'));
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&screen==='quiz'&&round&&round.feedback&&document.activeElement&&document.activeElement.id!=='next'){e.preventDefault();next();}});
 function offlineStatus(){const e=document.getElementById('offline-status');if(e)e.textContent=navigator.onLine?'Works without an account':'Offline · ready to practise';}
 window.addEventListener('online',offlineStatus);window.addEventListener('offline',offlineStatus);offlineStatus();
